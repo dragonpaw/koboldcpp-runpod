@@ -139,10 +139,13 @@ jobs:
 
           sha256: $(cut -d' ' -f1 dist/koboldcpp-linux-x64.sha256)
           NOTES
+          # Releases are immutable: nas-stuff/gpu pins KCPP_BIN_URL to a release
+          # tag, so replacing an asset would silently change what every pod boots.
+          # To rebuild, delete the release (and its tag) by hand first.
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/koboldcpp-linux-x64 dist/koboldcpp-linux-x64.sha256 --clobber --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$RELEASE_TAG" dist/koboldcpp-linux-x64 dist/koboldcpp-linux-x64.sha256 \
-              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title "KoboldCpp $UPSTREAM_TAG (sm_86 + sm_89)" --notes-file notes.md
+            echo "::error::release $RELEASE_TAG already exists; refusing to replace a pinned binary. Delete it by hand to rebuild."
+            exit 1
           fi
+          gh release create "$RELEASE_TAG" dist/koboldcpp-linux-x64 dist/koboldcpp-linux-x64.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "KoboldCpp $UPSTREAM_TAG (sm_86 + sm_89)" --notes-file notes.md
