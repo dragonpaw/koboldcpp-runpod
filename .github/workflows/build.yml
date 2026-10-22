@@ -1,0 +1,124 @@
+# Mirrors upstream LostRuins/koboldcpp .github/workflows/kcpp-build-release-linux.yaml
+# (at the pinned tag) with one change: the CUDA arch selection. Upstream's
+# LLAMA_ARCHES_CU12 block ships PTX only (compute_50..compute_80), so Ampere
+# A40 / Ada L40S JIT-compile every kernel on first start. This build ships real
+# SASS for sm_86 + sm_89, plus compute_89 PTX for forward compatibility.
+name: Build koboldcpp-linux-x64 (sm_86 + sm_89)
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream LostRuins/koboldcpp tag to build (e.g. v1.123.1)'
+        required: true
+
+env:
+  UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+  RELEASE_TAG: ${{ inputs.upstream_tag }}-sm86-sm89
+  KCPP_CUDA: 12.1.0
+  ARCHES_CU12: 1
+  KCPP_PORTABLE: 1
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    container:
+      image: ubuntu:20.04
+      options: --privileged
+    steps:
+      - name: Clone upstream at tag
+        uses: actions/checkout@v5
+        with:
+          repository: LostRuins/koboldcpp
+          ref: ${{ inputs.upstream_tag }}
+
+      - name: Dependencies
+        run: |
+          apt-get update
+          apt-get install -y sudo
+          export DEBIAN_FRONTEND=noninteractive
+          sudo ln -fs /usr/share/zoneinfo/UTC /etc/localtime
+          echo "tzdata tzdata/Areas select Etc" | sudo debconf-set-selections
+          echo "tzdata tzdata/Zones/Etc select UTC" | sudo debconf-set-selections
+          sudo apt-get -y install git curl bzip2 python3-tk tcl tk
+
+      - name: Set Tcl/Tk Paths
+        run: |
+          echo "TCL_LIBRARY=$(find /usr/lib/ -name 'tcl8*' | head -n 1)" >> $GITHUB_ENV
+          echo "TK_LIBRARY=$(find /usr/lib/ -name 'tk8*' | head -n 1)" >> $GITHUB_ENV
+
+      # The only change from upstream: replace the LLAMA_ARCHES_CU12 block's
+      # gencode list (koboldcpp.sh passes LLAMA_ARCHES_CU12=1 when ARCHES_CU12 is set).
+      - name: Patch CUDA arches (sm_86 + sm_89 SASS, compute_89 PTX)
+        run: |
+          perl -0pi -e 's/(else ifdef LLAMA_ARCHES_CU12\n).*?(\n\n)/$1NVCCFLAGS += -Wno-deprecated-gpu-targets \\\n             -gencode arch=compute_86,code=sm_86 \\\n             -gencode arch=compute_89,code=sm_89 \\\n             -gencode arch=compute_89,code=compute_89 \\\n             -DKCPP_LIMIT_CUDA_MAX_ARCH=890$2/s or die "LLAMA_ARCHES_CU12 block not found\n"' Makefile
+          sed -n '/^else ifdef LLAMA_ARCHES_CU12$/,/^$/p' Makefile
+          grep -q 'code=sm_89' Makefile
+
+      - name: Build
+        run: |
+          ./koboldcpp.sh dist
+
+      - name: Rename file before upload
+        run: mv dist/koboldcpp-linux-x64-cuda1210 dist/koboldcpp-linux-x64
+
+      # Fails the job unless the CUDA library bundled into the binary carries
+      # real SASS for both sm_86 and sm_89.
+      - name: Verify SASS with cuobjdump
+        run: |
+          bin/micromamba install --no-rc -r "$PWD/conda" -p "$PWD/conda/envs/linux" \
+            -c nvidia/label/cuda-12.1.0 cuda-cuobjdump -y
+          CUOBJDUMP="$PWD/conda/envs/linux/bin/cuobjdump"
+          "$CUOBJDUMP" --list-elf koboldcpp_cublas.so | tee elf.txt | sed -n '1,20p'
+          echo "ELF entries: $(wc -l < elf.txt)"
+          "$CUOBJDUMP" --list-ptx koboldcpp_cublas.so | sed -n '1,5p' || true
+          for sm in sm_86 sm_89; do
+            grep -q "$sm" elf.txt || { echo "::error::no $sm SASS in koboldcpp_cublas.so"; exit 1; }
+            echo "found $sm: $(grep -c "$sm" elf.txt) cubins"
+          done
+          sha256sum dist/koboldcpp-linux-x64 | tee dist/koboldcpp-linux-x64.sha256
+
+      - name: Save artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: kcpp_linux_binary
+          path: |
+            dist/koboldcpp-linux-x64
+            dist/koboldcpp-linux-x64.sha256
+          retention-days: 7
+
+      - name: Install GitHub CLI
+        run: |
+          apt-get update
+          apt-get install -y curl
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          apt-get update
+          apt-get install -y gh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(gh api "repos/LostRuins/koboldcpp/commits/$UPSTREAM_TAG" --jq .sha)
+          cat > notes.md <<NOTES
+          KoboldCpp $UPSTREAM_TAG built with native SASS for sm_86 + sm_89 (plus compute_89 PTX).
+          Drop-in replacement for upstream's \`koboldcpp-linux-x64\` (CUDA 12.1).
+
+          Source: https://github.com/LostRuins/koboldcpp/tree/$SHA (tag $UPSTREAM_TAG), AGPL-3.0.
+          Only change: the Makefile's LLAMA_ARCHES_CU12 gencode list (see .github/workflows/build.yml in this repo).
+
+          sha256: $(cut -d' ' -f1 dist/koboldcpp-linux-x64.sha256)
+          NOTES
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/koboldcpp-linux-x64 dist/koboldcpp-linux-x64.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" dist/koboldcpp-linux-x64 dist/koboldcpp-linux-x64.sha256 \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "KoboldCpp $UPSTREAM_TAG (sm_86 + sm_89)" --notes-file notes.md
+          fi
