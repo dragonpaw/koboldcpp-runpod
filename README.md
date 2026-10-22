@@ -25,7 +25,9 @@ Makefile's `LLAMA_ARCHES_CU12` gencode list:
 ```
 
 The job fails unless `cuobjdump --list-elf koboldcpp_cublas.so` shows both
-`sm_86` and `sm_89`.
+`sm_86` and `sm_89`. The build job runs upstream's code with a read-only token
+and no persisted credentials; a separate publish job, which runs no upstream
+code, creates the release from the build artifact.
 
 GPUs older than sm_86 are **not** supported by this binary (no PTX for them).
 Use upstream's build for those.
@@ -50,11 +52,15 @@ KCPP_BIN_OVERRIDE=https://github.com/dragonpaw/koboldcpp-runpod/releases/downloa
 
 ## Bumping to a new upstream version
 
-1. Actions → *Build koboldcpp-linux-x64 (sm_86 + sm_89)* → Run workflow,
-   with `upstream_tag` set to the new upstream tag (e.g. `v1.124.0`), or
-   `gh workflow run build.yml -R dragonpaw/koboldcpp-runpod -f upstream_tag=v1.124.0`.
-2. The job publishes release `<tag>-sm86-sm89` with the asset.
-3. Update the table above and whatever pins the download URL.
+1. Look up the commit the new tag points at:
+   `git ls-remote https://github.com/LostRuins/koboldcpp 'refs/tags/v1.124.0*'`
+   (use the `^{}` line if the tag is annotated).
+2. Actions → *Build koboldcpp-linux-x64 (sm_86 + sm_89)* → Run workflow with
+   `upstream_tag` and `upstream_sha`, or
+   `gh workflow run build.yml -R dragonpaw/koboldcpp-runpod -f upstream_tag=v1.124.0 -f upstream_sha=<sha>`.
+   The build checks out that SHA and fails if the tag no longer points at it.
+3. The job publishes release `<tag>-sm86-sm89` with the asset.
+4. Update the table above and whatever pins the download URL.
 
 If upstream reshapes the `LLAMA_ARCHES_CU12` Makefile block or the dist
 output name, the patch step or rename step fails loudly; adjust the workflow

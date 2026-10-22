@@ -3,6 +3,11 @@
 # LLAMA_ARCHES_CU12 block ships PTX only (compute_50..compute_80), so Ampere
 # A40 / Ada L40S JIT-compile every kernel on first start. This build ships real
 # SASS for sm_86 + sm_89, plus compute_89 PTX for forward compatibility.
+#
+# Supply-chain shape: the `build` job runs upstream code with a read-only token
+# and no persisted credentials; only the `publish` job (which runs no upstream
+# code) can write a release. The upstream tag must resolve to `upstream_sha`,
+# so a moved tag cannot change what gets built.
 name: Build koboldcpp-linux-x64 (sm_86 + sm_89)
 
 on:
@@ -11,28 +16,35 @@ on:
       upstream_tag:
         description: 'Upstream LostRuins/koboldcpp tag to build (e.g. v1.123.1)'
         required: true
+      upstream_sha:
+        description: 'Full commit SHA that tag must point at (git ls-remote https://github.com/LostRuins/koboldcpp refs/tags/<tag>)'
+        required: true
 
 env:
   UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+  UPSTREAM_SHA: ${{ inputs.upstream_sha }}
   RELEASE_TAG: ${{ inputs.upstream_tag }}-sm86-sm89
-  KCPP_CUDA: 12.1.0
-  ARCHES_CU12: 1
-  KCPP_PORTABLE: 1
 
 jobs:
-  linux:
+  build:
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
+      contents: read
+    # Upstream's builder image. Upstream also passes --privileged; nothing in
+    # the compile or pyinstaller packaging needs it, so it is dropped here.
     container:
       image: ubuntu:20.04
-      options: --privileged
+    env:
+      KCPP_CUDA: 12.1.0
+      ARCHES_CU12: 1
+      KCPP_PORTABLE: 1
     steps:
-      - name: Clone upstream at tag
+      - name: Clone upstream at the pinned SHA
         uses: actions/checkout@v5
         with:
           repository: LostRuins/koboldcpp
-          ref: ${{ inputs.upstream_tag }}
+          ref: ${{ inputs.upstream_sha }}
+          persist-credentials: false
 
       - name: Dependencies
         run: |
@@ -43,6 +55,18 @@ jobs:
           echo "tzdata tzdata/Areas select Etc" | sudo debconf-set-selections
           echo "tzdata tzdata/Zones/Etc select UTC" | sudo debconf-set-selections
           sudo apt-get -y install git curl bzip2 python3-tk tcl tk
+
+      # Peeled (^{}) entry wins for an annotated tag; a lightweight tag has only the plain ref.
+      - name: Check the tag still points at upstream_sha
+        run: |
+          refs=$(git ls-remote https://github.com/LostRuins/koboldcpp "refs/tags/$UPSTREAM_TAG" "refs/tags/$UPSTREAM_TAG^{}")
+          echo "$refs"
+          got=$(echo "$refs" | grep '\^{}$' | cut -f1)
+          [ -n "$got" ] || got=$(echo "$refs" | cut -f1 | head -n 1)
+          if [ "$got" != "$UPSTREAM_SHA" ]; then
+            echo "::error::tag $UPSTREAM_TAG is ${got:-missing}, expected $UPSTREAM_SHA"
+            exit 1
+          fi
 
       - name: Set Tcl/Tk Paths
         run: |
@@ -71,14 +95,15 @@ jobs:
           bin/micromamba install --no-rc -r "$PWD/conda" -p "$PWD/conda/envs/linux" \
             -c nvidia/label/cuda-12.1.0 cuda-cuobjdump -y
           CUOBJDUMP="$PWD/conda/envs/linux/bin/cuobjdump"
-          "$CUOBJDUMP" --list-elf koboldcpp_cublas.so | tee elf.txt | sed -n '1,20p'
+          "$CUOBJDUMP" --list-elf koboldcpp_cublas.so > elf.txt
+          sed -n '1,20p' elf.txt
           echo "ELF entries: $(wc -l < elf.txt)"
           "$CUOBJDUMP" --list-ptx koboldcpp_cublas.so | sed -n '1,5p' || true
           for sm in sm_86 sm_89; do
             grep -q "$sm" elf.txt || { echo "::error::no $sm SASS in koboldcpp_cublas.so"; exit 1; }
             echo "found $sm: $(grep -c "$sm" elf.txt) cubins"
           done
-          sha256sum dist/koboldcpp-linux-x64 | tee dist/koboldcpp-linux-x64.sha256
+          (cd dist && sha256sum koboldcpp-linux-x64 | tee koboldcpp-linux-x64.sha256)
 
       - name: Save artifact
         uses: actions/upload-artifact@v6
@@ -89,28 +114,27 @@ jobs:
             dist/koboldcpp-linux-x64.sha256
           retention-days: 7
 
-      - name: Install GitHub CLI
-        run: |
-          apt-get update
-          apt-get install -y curl
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-            | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-            | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          apt-get update
-          apt-get install -y gh
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch built binary
+        uses: actions/download-artifact@v7
+        with:
+          name: kcpp_linux_binary
+          path: dist
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SHA=$(gh api "repos/LostRuins/koboldcpp/commits/$UPSTREAM_TAG" --jq .sha)
           cat > notes.md <<NOTES
           KoboldCpp $UPSTREAM_TAG built with native SASS for sm_86 + sm_89 (plus compute_89 PTX).
           Drop-in replacement for upstream's \`koboldcpp-linux-x64\` (CUDA 12.1).
 
-          Source: https://github.com/LostRuins/koboldcpp/tree/$SHA (tag $UPSTREAM_TAG), AGPL-3.0.
+          Source: https://github.com/LostRuins/koboldcpp/tree/$UPSTREAM_SHA (tag $UPSTREAM_TAG), AGPL-3.0.
           Only change: the Makefile's LLAMA_ARCHES_CU12 gencode list (see .github/workflows/build.yml in this repo).
 
           sha256: $(cut -d' ' -f1 dist/koboldcpp-linux-x64.sha256)
