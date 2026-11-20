@@ -56,6 +56,17 @@ jobs:
           echo "tzdata tzdata/Zones/Etc select UTC" | sudo debconf-set-selections
           sudo apt-get -y install git curl bzip2 python3-tk tcl tk
 
+      # Runs after Dependencies (the ubuntu:20.04 container has no git before it).
+      # The release tag is created on Forgejo (primary) and reaches GitHub through the push mirror,
+      # which prunes refs Forgejo doesn't have: a tag made here on GitHub would be deleted by the next
+      # mirror sync. So it must already exist on GitHub before anything is built (README "Bumping").
+      - name: Check the release tag came through the mirror
+        run: |
+          if [ -z "$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$RELEASE_TAG")" ]; then
+            echo "::error::tag $RELEASE_TAG is not on GitHub. Create it on Forgejo (ash/koboldcpp-runpod) and wait for the mirror; see README."
+            exit 1
+          fi
+
       # Peeled (^{}) entry wins for an annotated tag; a lightweight tag has only the plain ref.
       - name: Check the tag still points at upstream_sha
         run: |
@@ -141,11 +152,13 @@ jobs:
           NOTES
           # Releases are immutable: nas-stuff/gpu pins KCPP_BIN_URL to a release
           # tag, so replacing an asset would silently change what every pod boots.
-          # To rebuild, delete the release (and its tag) by hand first.
+          # To rebuild, delete the GitHub release by hand first (keep the tag: it
+          # lives on Forgejo and comes back with every mirror sync; to move it,
+          # re-tag on Forgejo and let the mirror carry it over).
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::release $RELEASE_TAG already exists; refusing to replace a pinned binary. Delete it by hand to rebuild."
             exit 1
           fi
           gh release create "$RELEASE_TAG" dist/koboldcpp-linux-x64 dist/koboldcpp-linux-x64.sha256 \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "KoboldCpp $UPSTREAM_TAG (sm_86 + sm_89)" --notes-file notes.md

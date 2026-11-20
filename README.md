@@ -55,12 +55,24 @@ KCPP_BIN_OVERRIDE=https://github.com/dragonpaw/koboldcpp-runpod/releases/downloa
 1. Look up the commit the new tag points at:
    `git ls-remote https://github.com/LostRuins/koboldcpp 'refs/tags/v1.124.0*'`
    (use the `^{}` line if the tag is annotated).
-2. Actions → *Build koboldcpp-linux-x64 (sm_86 + sm_89)* → Run workflow with
+2. Create the release tag **on Forgejo**, which is primary: GitHub is a one-way
+   push mirror that deletes refs Forgejo doesn't have, so a tag created on
+   GitHub (e.g. by `gh release create`) vanishes at the next mirror sync and
+   turns the release into a draft, breaking the download URL.
+   ```sh
+   git tag v1.124.0-sm86-sm89 origin/main && git push origin v1.124.0-sm86-sm89
+   git ls-remote https://github.com/dragonpaw/koboldcpp-runpod refs/tags/v1.124.0-sm86-sm89   # wait until it shows
+   ```
+3. Actions → *Build koboldcpp-linux-x64 (sm_86 + sm_89)* → Run workflow with
    `upstream_tag` and `upstream_sha`, or
    `gh workflow run build.yml -R dragonpaw/koboldcpp-runpod -f upstream_tag=v1.124.0 -f upstream_sha=<sha>`.
-   The build checks out that SHA and fails if the tag no longer points at it.
-3. The job publishes release `<tag>-sm86-sm89` with the asset.
-4. Update the table above and whatever pins the download URL.
+   The build fails first thing if `<tag>-sm86-sm89` isn't on GitHub yet, then
+   checks out that SHA and fails if the upstream tag no longer points at it.
+   The workflow stays on GitHub (Actions on, `workflow_dispatch` only: mirror
+   pushes never start it); edit it on Forgejo.
+4. The job publishes release `<tag>-sm86-sm89` on the existing tag
+   (`--verify-tag`) with the asset.
+5. Update the table above and whatever pins the download URL.
 
 If upstream reshapes the `LLAMA_ARCHES_CU12` Makefile block or the dist
 output name, the patch step or rename step fails loudly; adjust the workflow
