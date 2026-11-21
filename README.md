@@ -69,7 +69,8 @@ KCPP_BIN_OVERRIDE=https://github.com/dragonpaw/koboldcpp-runpod/releases/downloa
    The build fails first thing if `<tag>-sm86-sm89` isn't on GitHub yet, then
    checks out that SHA and fails if the upstream tag no longer points at it.
    The workflow stays on GitHub (Actions on, `workflow_dispatch` only: mirror
-   pushes never start it); edit it on Forgejo.
+   pushes never start it); edit it on Forgejo, and run `scripts/check-github-triggers`
+   before pushing (Forgejo CI runs it too: `.forgejo/workflows/check.yml`).
 4. The job publishes release `<tag>-sm86-sm89` on the existing tag
    (`--verify-tag`) with the asset.
 5. Update the table above and whatever pins the download URL.

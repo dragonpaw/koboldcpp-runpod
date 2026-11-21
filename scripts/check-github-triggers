@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Usage: scripts/check-github-triggers
+#
+# Fails if any .github/workflows/*.yml|yaml could be started by a push mirror.
+# GitHub is a one-way mirror of the Forgejo repo (git.cave.dragonpaw.org) and
+# keeps Actions ON here, so a push/pull_request/pull_request_target/create/
+# delete/release/workflow_run trigger in a GitHub workflow would run (and bill)
+# on every mirror push. Only schedule / workflow_dispatch-style triggers pass.
+#
+# The checker is scripts/wf_triggers.py, a vendored copy of nas-stuff
+# forgejo/wf_triggers.py (fail-closed: duplicate keys, odd shapes and parse
+# errors refuse). PyYAML is pinned and fetched by uv; no token, no network
+# beyond PyPI. Run it before pushing any edit to .github/workflows/.
+#
+# Exit 0: every GitHub workflow is mirror-safe (or there are none). 1: at least
+# one is not, or could not be read; the output names it.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+shopt -s nullglob
+files=(.github/workflows/*.yml .github/workflows/*.yaml)
+[ ${#files[@]} -gt 0 ] || { echo "ok: no GitHub workflows"; exit 0; }
+rc=0
+for f in "${files[@]}"; do
+  if out=$(uv run --quiet --no-project --with pyyaml==6.0.3 python3 -I scripts/wf_triggers.py < "$f"); then
+    echo "ok: $f ($out)"
+  else
+    echo "FAIL: $f: $out"; rc=1
+  fi
+done
+exit $rc

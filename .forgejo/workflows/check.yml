@@ -1,0 +1,21 @@
+# Forgejo Actions (runner on knot). The only job: keep .github/workflows/build.yml mirror-safe.
+# GitHub is a one-way push mirror of this repo and keeps Actions ON for build.yml (CUDA build +
+# GitHub Release for RunPod), so a push/pull_request/create/delete/release/workflow_run trigger
+# there would start on every mirror push. scripts/check-github-triggers refuses those (vendored
+# nas-stuff forgejo/wf_triggers.py, PyYAML pinned via uv). Run it yourself before pushing an edit.
+name: check
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  github-triggers:
+    name: github workflows · dispatch only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv
+        run: python3 -m pip install --break-system-packages "uv==0.13.8"
+      - name: no GitHub workflow can start on a mirror push
+        run: ./scripts/check-github-triggers
